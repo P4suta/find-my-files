@@ -52,7 +52,7 @@ internal sealed class StubSearchResult(IReadOnlyList<RowData> rows) : ISearchRes
 
         var start = (int)Math.Min(request.Offset, (ulong)rows.Count);
         var n = Math.Min((int)request.Count, rows.Count - start);
-        return [.. rows.Skip(start).Take(n)];
+        return (RowData[])[.. rows.Skip(start).Take(n)];
     }
 
     public void Dispose() => DisposeCount++;

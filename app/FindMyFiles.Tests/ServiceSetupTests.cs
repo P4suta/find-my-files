@@ -130,7 +130,7 @@ public sealed class ServiceSetupTests : IDisposable
     [Fact]
     public void DirectScmStart_ToleratesAnotherCallerWinningTheRace()
     {
-        var states = new Queue<uint?>([1, 2, 4]);
+        var states = new Queue<uint?>((uint?[])[1, 2, 4]);
         var starts = 0;
         var waits = 0;
         var result = ServiceSetup.DriveServiceControl(
@@ -153,7 +153,7 @@ public sealed class ServiceSetupTests : IDisposable
     [Fact]
     public void DirectScmStop_ToleratesAnotherCallerWinningTheRace()
     {
-        var states = new Queue<uint?>([4, 3, 1]);
+        var states = new Queue<uint?>((uint?[])[4, 3, 1]);
         var stops = 0;
         var result = ServiceSetup.DriveServiceControl(
             ServiceSetup.ScmControlVerb.Stop,
@@ -174,7 +174,7 @@ public sealed class ServiceSetupTests : IDisposable
     [Fact]
     public void DirectScmRestart_UsesOneBoundedStopThenStartSequence()
     {
-        var states = new Queue<uint?>([4, 3, 1, 1, 2, 4]);
+        var states = new Queue<uint?>((uint?[])[4, 3, 1, 1, 2, 4]);
         var starts = 0;
         var stops = 0;
         var waits = 0;
@@ -255,7 +255,7 @@ public sealed class ServiceSetupTests : IDisposable
 
         Assert.False(ServiceSetup.DriveServiceControl(
             ServiceSetup.ScmControlVerb.Start,
-            new Queue<uint?>([1, 1]).Dequeue,
+            new Queue<uint?>((uint?[])[1, 1]).Dequeue,
             () => 0,
             () => throw new InvalidOperationException(),
             maxPollAttempts: 2,
@@ -301,8 +301,8 @@ public sealed class ServiceSetupTests : IDisposable
     [Fact]
     public void DirectScmStop_retries_a_cannot_accept_control_race()
     {
-        var states = new Queue<uint?>([4, 4, 1]);
-        var stops = new Queue<int>([1061, 0]);
+        var states = new Queue<uint?>((uint?[])[4, 4, 1]);
+        var stops = new Queue<int>((int[])[1061, 0]);
         var waits = 0;
 
         Assert.True(ServiceSetup.DriveServiceControl(
@@ -412,8 +412,8 @@ public sealed class ServiceSetupTests : IDisposable
     [Fact]
     public void PollForCompatibleStartedService_WaitsForRunningThenCurrentPipe()
     {
-        var pids = new Queue<uint>([0, 0, 42]);
-        var probes = new Queue<bool>([false, true]);
+        var pids = new Queue<uint>((uint[])[0, 0, 42]);
+        var probes = new Queue<bool>((bool[])[false, true]);
         var waits = 0;
 
         var compatible = ServiceSetup.PollForCompatibleStartedService(
@@ -628,17 +628,17 @@ public sealed class ServiceSetupTests : IDisposable
         var harness = new ServiceSetupHarness { Manager = manager };
         using var scope = ServiceSetup.UseHooksForTests(harness.Hooks);
 
-        service.States = new Queue<uint>([1, 4]);
+        service.States = new Queue<uint>((uint[])[1, 4]);
         Assert.True(ServiceSetup.TryStartUnelevated());
         Assert.Equal(0x0014u, manager.LastAccess);
         Assert.Equal(1, service.StartCalls);
 
-        service.States = new Queue<uint>([4, 1]);
+        service.States = new Queue<uint>((uint[])[4, 1]);
         Assert.True(ServiceSetup.TryStopUnelevated());
         Assert.Equal(0x0024u, manager.LastAccess);
         Assert.Equal(1, service.StopCalls);
 
-        service.States = new Queue<uint>([4, 1, 1, 4]);
+        service.States = new Queue<uint>((uint[])[4, 1, 1, 4]);
         Assert.True(ServiceSetup.TryRestartUnelevated());
         Assert.Equal(0x0034u, manager.LastAccess);
         Assert.Equal(2, service.StartCalls);
@@ -669,7 +669,7 @@ public sealed class ServiceSetupTests : IDisposable
         var service = new FakeServiceHandle
         {
             ProcessResults = new Queue<(bool, uint, uint)>(
-            [
+            ((bool, uint, uint)[])[
                 (true, 2, 0),
                 (true, 4, 42),
             ]),
@@ -677,7 +677,7 @@ public sealed class ServiceSetupTests : IDisposable
         var harness = new ServiceSetupHarness
         {
             Manager = new FakeServiceManager { Service = service },
-            ProbeResults = new Queue<bool>([false, true]),
+            ProbeResults = new Queue<bool>((bool[])[false, true]),
             Sid = "S-1-5-18",
         };
         using var scope = ServiceSetup.UseHooksForTests(harness.Hooks);
@@ -763,7 +763,7 @@ public sealed class ServiceSetupTests : IDisposable
             maxPollAttempts: 1,
             () => { }));
 
-        var states = new Queue<uint?>([4, 1]);
+        var states = new Queue<uint?>((uint?[])[4, 1]);
         Assert.False(ServiceSetup.DriveServiceControl(
             ServiceSetup.ScmControlVerb.Restart,
             states.Dequeue,
@@ -842,7 +842,7 @@ public sealed class ServiceSetupTests : IDisposable
         var starts = 0;
         Assert.False(ServiceSetup.DriveServiceControl(
             ServiceSetup.ScmControlVerb.Start,
-            new Queue<uint?>([1, 1]).Dequeue,
+            new Queue<uint?>((uint?[])[1, 1]).Dequeue,
             () =>
             {
                 starts++;
@@ -856,7 +856,7 @@ public sealed class ServiceSetupTests : IDisposable
         var stops = 0;
         Assert.True(ServiceSetup.DriveServiceControl(
             ServiceSetup.ScmControlVerb.Stop,
-            new Queue<uint?>([4, 4, 1]).Dequeue,
+            new Queue<uint?>((uint?[])[4, 4, 1]).Dequeue,
             () => 0,
             () =>
             {
@@ -972,7 +972,7 @@ public sealed class ServiceSetupTests : IDisposable
 
         public ProcessStartInfo? StartInfo { get; private set; }
 
-        public Queue<bool> ProbeResults { get; set; } = new([true]);
+        public Queue<bool> ProbeResults { get; set; } = new((bool[])[true]);
 
         public string? LastPipeName { get; private set; }
 

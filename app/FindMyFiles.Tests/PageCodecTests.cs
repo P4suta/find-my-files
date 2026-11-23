@@ -84,7 +84,7 @@ public sealed class PageCodecTests
         var parent = "C:\\" + new string('x', ushort.MaxValue);
         var expected = new RowData(1, 1, 0, 0, 0, "n", parent);
 
-        var encoded = PipeProtocol.EncodePageResp([expected]);
+        var encoded = PipeProtocol.EncodePageResp((RowData[])[expected]);
         var actual = Assert.Single(PipeProtocol.DecodePageResp(encoded));
 
         Assert.Equal(expected, actual);

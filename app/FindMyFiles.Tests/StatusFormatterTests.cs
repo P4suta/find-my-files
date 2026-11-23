@@ -42,7 +42,7 @@ public sealed class StatusFormatterTests
     [Fact]
     public void Overall_NoStatusButRequested_ReportsIndexing()
     {
-        Assert.Equal("Indexing: C:, D:", StatusFormatter.Overall([], ["C:", "D:"]));
+        Assert.Equal("Indexing: C:, D:", StatusFormatter.Overall([], (string[])["C:", "D:"]));
     }
 
     [Fact]
@@ -53,7 +53,7 @@ public sealed class StatusFormatterTests
             new("C:", VolumeState.Ready, 1000),
             new("D:", VolumeState.Ready, 234),
         ];
-        Assert.Equal("Ready — 1,234 items", StatusFormatter.Overall(vols, ["C:", "D:"]));
+        Assert.Equal("Ready — 1,234 items", StatusFormatter.Overall(vols, (string[])["C:", "D:"]));
     }
 
     [Fact]
@@ -64,14 +64,14 @@ public sealed class StatusFormatterTests
             new("C:", VolumeState.Ready, 1000),
             new("D:", VolumeState.Scanning, 0),
         ];
-        Assert.Equal("Indexing: D:", StatusFormatter.Overall(vols, ["C:", "D:"]));
+        Assert.Equal("Indexing: D:", StatusFormatter.Overall(vols, (string[])["C:", "D:"]));
     }
 
     [Fact]
     public void Overall_AllFailed_ReportsFailure()
     {
         VolumeStatus[] vols = [new("C:", VolumeState.Failed, 0)];
-        Assert.Equal("Indexing failed: C:", StatusFormatter.Overall(vols, ["C:"]));
+        Assert.Equal("Indexing failed: C:", StatusFormatter.Overall(vols, (string[])["C:"]));
     }
 
     [Theory]

@@ -48,7 +48,7 @@ internal sealed class OffThreadEngineClient : IEngineClient
     public async Task<IReadOnlyList<string>> ListVolumesAsync(CancellationToken ct = default)
     {
         await Task.Delay(Hop, ct).ConfigureAwait(false);
-        return ThrowOnStartup is { } ex ? throw ex : (IReadOnlyList<string>)["F:"];
+        return ThrowOnStartup is { } ex ? throw ex : (IReadOnlyList<string>)(string[])["F:"];
     }
 
     public async Task StartIndexingAsync(

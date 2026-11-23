@@ -433,7 +433,7 @@ jobs:
           path: build/engine/release/
       - uses: actions/setup-dotnet@0f4a354dd5547a28c70b7853dbd95d5b67886e73 # v6.1.0
         with:
-          dotnet-version: 10.0.404
+          dotnet-version: 11.0.100
       - uses: $/.github/actions/setup-winapp
         id: winapp
       - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3

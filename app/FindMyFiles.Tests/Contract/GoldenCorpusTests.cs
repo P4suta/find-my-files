@@ -22,7 +22,7 @@ public sealed class GoldenCorpusTests
     private static IReadOnlyList<string> ManifestFiles()
     {
         using var doc = JsonDocument.Parse(Load("manifest.json"));
-        return [.. doc.RootElement.GetProperty("cases").EnumerateArray()
+        return (string[])[.. doc.RootElement.GetProperty("cases").EnumerateArray()
             .Select(c => c.GetProperty("file").GetString()!)];
     }
 

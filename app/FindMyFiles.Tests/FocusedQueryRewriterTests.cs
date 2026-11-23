@@ -78,7 +78,7 @@ public sealed class FocusedQueryRewriterTests
         Assert.Equal(
             @"report !path:""\windows\"" ext:pdf",
             FocusedQueryRewriter.Compose(
-                "report", [@"bad""path", @"\windows\"], ["pdf"]));
+                "report", (string[])[@"bad""path", @"\windows\"], (string[])["pdf"]));
     }
 
     [Fact]
@@ -87,7 +87,7 @@ public sealed class FocusedQueryRewriterTests
         Assert.Equal(
             "report ext:pdf",
             FocusedQueryRewriter.Compose(
-                "report", [], ["a b", "\"x", "c|d", "e;f", " ", "pdf"]));
+                "report", [], (string[])["a b", "\"x", "c|d", "e;f", " ", "pdf"]));
     }
 
     [Fact]
@@ -96,6 +96,6 @@ public sealed class FocusedQueryRewriterTests
         Assert.Equal("report", FocusedQueryRewriter.Compose("report", [], []));
         Assert.Equal(
             "report",
-            FocusedQueryRewriter.Compose("report", ["  "], ["a b"]));
+            FocusedQueryRewriter.Compose("report", (string[])["  "], (string[])["a b"]));
     }
 }

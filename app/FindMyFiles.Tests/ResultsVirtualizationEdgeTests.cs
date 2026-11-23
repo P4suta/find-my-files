@@ -24,7 +24,7 @@ public sealed class ResultsVirtualizationEdgeTests
     }
 
     private static List<PageSeed> SeedPage0(IReadOnlyList<RowData> rows) =>
-        [new PageSeed(0, [.. rows.Take(VirtualResultList.PageSize)])];
+        [new PageSeed(0, (RowData[])[.. rows.Take(VirtualResultList.PageSize)])];
 
     private ResultRow Row(int index) => Assert.IsType<ResultRow>(_list[index]);
 

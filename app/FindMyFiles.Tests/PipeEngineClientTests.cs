@@ -134,7 +134,7 @@ public sealed class PipeEngineClientTests
         await WaitUntilAsync(
             () => client.Connection == EngineConnectionState.Connected,
             "connected after Hello");
-        Assert.Equal(["C:"], await client.ListVolumesAsync(TestContext.Current.CancellationToken));
+        Assert.Equal((string[])["C:"], await client.ListVolumesAsync(TestContext.Current.CancellationToken));
     }
 
     [Fact]
@@ -380,7 +380,7 @@ public sealed class PipeEngineClientTests
             var replacement = client.CurrentPipeConnectionForTests;
             Assert.NotNull(replacement);
             Assert.NotSame(originalConnection, replacement);
-            Assert.Equal(["C:"], await client.ListVolumesAsync(TestContext.Current.CancellationToken));
+            Assert.Equal((string[])["C:"], await client.ListVolumesAsync(TestContext.Current.CancellationToken));
         }
         finally
         {
@@ -495,7 +495,7 @@ public sealed class PipeEngineClientTests
             allowReconnectPublication.SetResult();
             await reconnectPublished.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
             server.Handler = null;
-            Assert.Equal(["C:"], await client.ListVolumesAsync(TestContext.Current.CancellationToken));
+            Assert.Equal((string[])["C:"], await client.ListVolumesAsync(TestContext.Current.CancellationToken));
         }
         finally
         {
@@ -580,7 +580,7 @@ public sealed class PipeEngineClientTests
                 PipeProtocol.Status.Ok,
                 PipeProtocol.EncodeVolumeStatuses(server.Statuses)));
             await replacementPending.AssertCompletesAsync();
-            Assert.Equal(["C:"], await replacementRequest);
+            Assert.Equal((string[])["C:"], await replacementRequest);
             Assert.Equal(2, server.ConnectionCount);
             Assert.Equal(EngineConnectionState.Connected, client.Connection);
         }

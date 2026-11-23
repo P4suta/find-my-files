@@ -34,7 +34,7 @@ public sealed class NotificationCenterTests : IDisposable
         }
 
         Assert.Equal(3, _center.Items.Count);
-        Assert.Equal(["n1", "n2", "n3"], _center.Items.Select(n => n.Message), StringComparer.Ordinal);
+        Assert.Equal((string[])["n1", "n2", "n3"], _center.Items.Select(n => n.Message), StringComparer.Ordinal);
     }
 
     [Fact]

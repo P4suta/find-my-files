@@ -46,7 +46,7 @@ public abstract class EngineClientContractTests(ITestOutputHelper output) : IAsy
             ?? Path.Combine(AppContext.BaseDirectory, "golden");
         using var doc = JsonDocument.Parse(
             File.ReadAllBytes(Path.Combine(dir, "invalid_queries.json")));
-        return [.. doc.RootElement.GetProperty("queries").EnumerateArray()
+        return (string[])[.. doc.RootElement.GetProperty("queries").EnumerateArray()
             .Select(q => q.GetString()!)];
     }
 
@@ -154,9 +154,9 @@ public abstract class EngineClientContractTests(ITestOutputHelper output) : IAsy
         }
 
         await Assert.ThrowsAsync<ArgumentException>(
-            async () => await client.StartIndexingAsync(["..\\escape"], TestContext.Current.CancellationToken));
+            async () => await client.StartIndexingAsync((string[])["..\\escape"], TestContext.Current.CancellationToken));
         await Assert.ThrowsAsync<ArgumentException>(
-            async () => await client.StartIndexingAsync(["C:", "c:"], TestContext.Current.CancellationToken));
+            async () => await client.StartIndexingAsync((string[])["C:", "c:"], TestContext.Current.CancellationToken));
         await Assert.ThrowsAsync<ArgumentOutOfRangeException>(
             async () => await client.StartIndexingAsync(
                 Enumerable.Repeat("C:", EngineContract.MaxVolumes + 1).ToArray(), TestContext.Current.CancellationToken));
@@ -201,7 +201,7 @@ public abstract class EngineClientContractTests(ITestOutputHelper output) : IAsy
         using var cts = new CancellationTokenSource();
         cts.Cancel();
         await Assert.ThrowsAnyAsync<OperationCanceledException>(
-            () => client.StartIndexingAsync(["C:"], cts.Token));
+            () => client.StartIndexingAsync((string[])["C:"], cts.Token));
     }
 
     [Fact]

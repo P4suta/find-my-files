@@ -391,7 +391,7 @@ public sealed class MainViewModelTests
         vm.SearchText = "one";
         dispatcher.FireTimers();
 
-        Assert.Single(engine.Searches).CompleteWith([Rows.File(1, "one.txt")]);
+        Assert.Single(engine.Searches).CompleteWith((RowData[])[Rows.File(1, "one.txt")]);
 
         Assert.False(vm.HasNoResults);
     }

@@ -91,7 +91,7 @@ internal sealed class StubEngineClient : IEngineClient
         return ListVolumesTask
             ?? (ThrowOnStartup is { } ex
                 ? Task.FromException<IReadOnlyList<string>>(ex)
-                : Task.FromResult<IReadOnlyList<string>>(["F:"]));
+                : Task.FromResult<IReadOnlyList<string>>((string[])["F:"]));
     }
 
     public Task StartIndexingAsync(
