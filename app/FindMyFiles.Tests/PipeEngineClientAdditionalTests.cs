@@ -273,9 +273,9 @@ public sealed class PipeEngineClientAdditionalTests
             () => client.Connection == EngineConnectionState.Connected,
             "connected");
 
-        Assert.Equal(["C:"], await client.ListVolumesAsync(TestContext.Current.CancellationToken));
-        await client.StartIndexingAsync(["C:"], TestContext.Current.CancellationToken);
-        Assert.Equal([new VolumeStatus("C:", VolumeState.Ready, 42)], await client.GetStatusAsync(TestContext.Current.CancellationToken));
+        Assert.Equal((string[])["C:"], await client.ListVolumesAsync(TestContext.Current.CancellationToken));
+        await client.StartIndexingAsync((string[])["C:"], TestContext.Current.CancellationToken);
+        Assert.Equal((VolumeStatus[])[new VolumeStatus("C:", VolumeState.Ready, 42)], await client.GetStatusAsync(TestContext.Current.CancellationToken));
         Assert.NotNull(await client.GetStatsAsync(TestContext.Current.CancellationToken));
 
         client.Dispose();
@@ -372,7 +372,7 @@ public sealed class PipeEngineClientAdditionalTests
 
         Task InvokeAsync() => operation switch
         {
-            0 => client.StartIndexingAsync(["C:"]),
+            0 => client.StartIndexingAsync((string[])["C:"]),
             1 => client.GetStatusAsync(),
             _ => client.SearchAsync("query", SearchOptions.Default),
         };
@@ -583,7 +583,7 @@ public sealed class PipeEngineClientAdditionalTests
             Handler = (opcode, _) => opcode == PipeProtocol.Op.IndexStatus
                 ? Task.FromResult((
                     PipeProtocol.Status.Io,
-                    PipeProtocol.EncodeVolumeStatuses([new("C:", VolumeState.Ready, 1)])))
+                    PipeProtocol.EncodeVolumeStatuses((VolumeStatus[])[new("C:", VolumeState.Ready, 1)])))
                 : null,
         };
         using var client = new PipeEngineClient(server.PipeName, autoStart: false);
@@ -682,7 +682,7 @@ public sealed class PipeEngineClientAdditionalTests
         client.VolumeUpdated += _ => throw new InvalidOperationException("volume catchup failed");
         client.IndexChanged += _ => throw new InvalidOperationException("index catchup failed");
 
-        client.PublishHandshakeCatchUpForTests([new("C:", VolumeState.Ready, 1)]);
+        client.PublishHandshakeCatchUpForTests((VolumeStatus[])[new("C:", VolumeState.Ready, 1)]);
 
         Assert.Contains("event=VolumeUpdated", log.Text, StringComparison.Ordinal);
         Assert.Contains("event=IndexChanged", log.Text, StringComparison.Ordinal);
@@ -779,7 +779,7 @@ public sealed class PipeEngineClientAdditionalTests
         response.SetResult((
             PipeProtocol.Status.Ok,
             PipeProtocol.EncodeVolumeStatuses(server.Statuses)));
-        Assert.Equal(["C:"], await request);
+        Assert.Equal((string[])["C:"], await request);
     }
 
     [Fact]

@@ -840,7 +840,7 @@ internal sealed class PipeEngineClient : IEngineClient
         ct.ThrowIfCancellationRequested();
         var payload = await RequestOkAsync(PipeProtocol.Op.ListVolumes, [], "ListVolumes", ct)
             .ConfigureAwait(false);
-        return [.. PipeProtocol.DecodeVolumeStatuses(payload).Select(s => s.Label)];
+        return Array.AsReadOnly<string>([.. PipeProtocol.DecodeVolumeStatuses(payload).Select(s => s.Label)]);
     }
 
     /// <inheritdoc/>

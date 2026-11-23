@@ -108,7 +108,7 @@ public sealed class ResultRowTests
     {
         var row = ResultRow.CreatePlaceholder(0);
         row.Fill(Rows.File(1, "report.txt"), MatchHighlighter.Compile("rep"));
-        Assert.Equal([new HighlightRange(0, 3)], row.NameRanges);
+        Assert.Equal((HighlightRange[])[new HighlightRange(0, 3)], row.NameRanges);
         Assert.Empty(row.PathRanges);
     }
 
@@ -127,8 +127,8 @@ public sealed class ResultRowTests
         var row = ResultRow.CreatePlaceholder(0);
 
         row.Fill(Rows.File(1, "report.txt"), MatchHighlighter.Compile(@"t\report"));
-        Assert.Equal([new HighlightRange(3, 2)], row.PathRanges);
-        Assert.Equal([new HighlightRange(0, 6)], row.NameRanges);
+        Assert.Equal((HighlightRange[])[new HighlightRange(3, 2)], row.PathRanges);
+        Assert.Equal((HighlightRange[])[new HighlightRange(0, 6)], row.NameRanges);
     }
 
     [Fact]

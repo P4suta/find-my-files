@@ -114,7 +114,7 @@ internal sealed class FakeEngineClient : IEngineClient
     public Task<IReadOnlyList<string>> ListVolumesAsync(CancellationToken ct = default)
     {
         ct.ThrowIfCancellationRequested();
-        return Task.FromResult<IReadOnlyList<string>>(["F:"]);
+        return Task.FromResult<IReadOnlyList<string>>(Array.AsReadOnly<string>(["F:"]));
     }
 
     /// <inheritdoc/>
@@ -131,7 +131,7 @@ internal sealed class FakeEngineClient : IEngineClient
     {
         ct.ThrowIfCancellationRequested();
         return Task.FromResult<IReadOnlyList<VolumeStatus>>(
-            [new("F:", VolumeState.Ready, (ulong)_rows.Count)]);
+            Array.AsReadOnly<VolumeStatus>([new("F:", VolumeState.Ready, (ulong)_rows.Count)]));
     }
 
     private readonly List<QueryTraceData> _traces = [];

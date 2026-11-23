@@ -432,8 +432,8 @@ public sealed class SearchOrchestratorTests : IDisposable
     public void FocusedSearch_RewritesTheQuery_OnlyWhileTheToggleIsOn()
     {
         SyncContext.RunContinuationsInline();
-        _orchestrator.FocusedExcludePathsForTests = [@"\windows\"];
-        _orchestrator.FocusedExtensionsForTests = ["pdf"];
+        _orchestrator.FocusedExcludePathsForTests = (string[])[@"\windows\"];
+        _orchestrator.FocusedExtensionsForTests = (string[])["pdf"];
         _request = new SearchRequest("report", SearchOptions.Default);
 
         _orchestrator.Requery(RequeryOrigin.Initial);
@@ -452,8 +452,8 @@ public sealed class SearchOrchestratorTests : IDisposable
     public void RegexMode_PassesOptionsThrough_AndSuppressesFocusedRewrite()
     {
         SyncContext.RunContinuationsInline();
-        _orchestrator.FocusedExcludePathsForTests = [@"\windows\"];
-        _orchestrator.FocusedExtensionsForTests = ["pdf"];
+        _orchestrator.FocusedExcludePathsForTests = (string[])[@"\windows\"];
+        _orchestrator.FocusedExtensionsForTests = (string[])["pdf"];
         _orchestrator.FocusedSearch = true;
 
         var opts = new SearchOptions(
@@ -491,12 +491,12 @@ public sealed class SearchOrchestratorTests : IDisposable
             });
 
         _orchestrator.Requery(RequeryOrigin.Filter);
-        Assert.Single(_engine.Searches).CompleteWith([Rows.File(1, "report.txt")]);
+        Assert.Single(_engine.Searches).CompleteWith((RowData[])[Rows.File(1, "report.txt")]);
 
         var row = Assert.IsType<ResultRow>(_presenter.ResultsSource[0]);
         if (expectedHighlight)
         {
-            Assert.Equal([new HighlightRange(0, 6)], row.NameRanges);
+            Assert.Equal((HighlightRange[])[new HighlightRange(0, 6)], row.NameRanges);
         }
         else
         {

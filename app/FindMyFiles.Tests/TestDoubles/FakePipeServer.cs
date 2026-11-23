@@ -85,7 +85,7 @@ internal sealed class FakePipeServer : IDisposable
         {
             lock (_gate)
             {
-                return [.. _received];
+                return ((int Connection, ushort Opcode, byte[] Payload)[])[.. _received];
             }
         }
     }

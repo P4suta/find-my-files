@@ -152,7 +152,7 @@ public sealed class PipeProtocolTests
     [Fact]
     public void VolumeStatusJson_IsSnakeCase_AndRoundTrips()
     {
-        var bytes = PipeProtocol.EncodeVolumeStatuses([new("C:", VolumeState.Ready, 42)]);
+        var bytes = PipeProtocol.EncodeVolumeStatuses((VolumeStatus[])[new("C:", VolumeState.Ready, 42)]);
 
         Assert.Equal("""[{"volume":"C:","state":1,"entries":42}]""", Encoding.UTF8.GetString(bytes));
         Assert.Equal(
@@ -163,10 +163,10 @@ public sealed class PipeProtocolTests
     [Fact]
     public void IndexStartReq_IsSnakeCaseJson()
     {
-        var bytes = PipeProtocol.EncodeIndexStartReq(["c:", "D:"]);
+        var bytes = PipeProtocol.EncodeIndexStartReq((string[])["c:", "D:"]);
 
         Assert.Equal("""{"volumes":["C:","D:"]}""", Encoding.UTF8.GetString(bytes));
-        Assert.Equal(["C:", "D:"], PipeProtocol.DecodeIndexStartReq(bytes));
+        Assert.Equal((string[])["C:", "D:"], PipeProtocol.DecodeIndexStartReq(bytes));
     }
 
     [Theory]
@@ -179,9 +179,9 @@ public sealed class PipeProtocolTests
     public void IndexStartReq_RejectsMalformedAndUnboundedLists()
     {
         Assert.Throws<ArgumentException>(
-            () => PipeProtocol.EncodeIndexStartReq(["..\\escape"]));
+            () => PipeProtocol.EncodeIndexStartReq((string[])["..\\escape"]));
         Assert.Throws<ArgumentException>(
-            () => PipeProtocol.EncodeIndexStartReq(["C:", "c:"]));
+            () => PipeProtocol.EncodeIndexStartReq((string[])["C:", "c:"]));
         Assert.Throws<ArgumentOutOfRangeException>(
             () => PipeProtocol.EncodeIndexStartReq(
                 Enumerable.Repeat("C:", EngineContract.MaxVolumes + 1).ToArray()));
@@ -213,7 +213,7 @@ public sealed class PipeProtocolTests
     [Fact]
     public void PageResp_LyingLengths_AreRejected()
     {
-        var bytes = PipeProtocol.EncodePageResp([new(1, 1, 1, 1, 0, "a", "C:\\")]);
+        var bytes = PipeProtocol.EncodePageResp((RowData[])[new(1, 1, 1, 1, 0, "a", "C:\\")]);
         bytes[0] = 2;
 
         var ex = Assert.Throws<InvalidDataException>(() => PipeProtocol.DecodePageResp(bytes));
@@ -226,7 +226,7 @@ public sealed class PipeProtocolTests
     [Fact]
     public void PageResp_LyingBlobLength_IsRejected()
     {
-        var bytes = PipeProtocol.EncodePageResp([new(1, 1, 1, 1, 0, "ab", "C:\\")]);
+        var bytes = PipeProtocol.EncodePageResp((RowData[])[new(1, 1, 1, 1, 0, "ab", "C:\\")]);
         bytes[4]++;
 
         Assert.Throws<InvalidDataException>(() => PipeProtocol.DecodePageResp(bytes));

@@ -20,7 +20,7 @@ public sealed class VirtualResultListTests
     }
 
     private static List<PageSeed> SeedPage0(IReadOnlyList<RowData> rows) =>
-        [new PageSeed(0, [.. rows.Take(VirtualResultList.PageSize)])];
+        [new PageSeed(0, (RowData[])[.. rows.Take(VirtualResultList.PageSize)])];
 
     private ResultRow Row(int index) => Assert.IsType<ResultRow>(_list[index]);
 
@@ -47,7 +47,7 @@ public sealed class VirtualResultListTests
         var rows = Rows.Many(10, "report");
         _list.Reassign(
             new StubSearchResult(rows), SeedPage0(rows), MatchHighlighter.Compile("rep"));
-        Assert.Equal([new HighlightRange(0, 3)], Row(0).NameRanges);
+        Assert.Equal((HighlightRange[])[new HighlightRange(0, 3)], Row(0).NameRanges);
     }
 
     [Fact]

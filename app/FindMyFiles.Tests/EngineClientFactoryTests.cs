@@ -383,7 +383,7 @@ public sealed class EngineClientFactoryTests
         await Assert.ThrowsAsync<EngineUnavailableException>(
             () => engine.ListVolumesAsync(TestContext.Current.CancellationToken));
         await Assert.ThrowsAsync<EngineUnavailableException>(
-            () => engine.StartIndexingAsync(["C:"], TestContext.Current.CancellationToken));
+            () => engine.StartIndexingAsync((string[])["C:"], TestContext.Current.CancellationToken));
         await Assert.ThrowsAsync<EngineUnavailableException>(
             () => engine.GetStatusAsync(TestContext.Current.CancellationToken));
         await Assert.ThrowsAsync<EngineUnavailableException>(
