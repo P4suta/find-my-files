@@ -462,11 +462,11 @@ dependencies = [
 
 [[package]]
 name = "fmf-buildstamp"
-version = "0.1.1"
+version = "0.2.0"
 
 [[package]]
 name = "fmf-cli"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "anstream",
  "anstyle",
@@ -486,18 +486,18 @@ dependencies = [
 
 [[package]]
 name = "fmf-contract"
-version = "0.1.1"
+version = "0.2.0"
 
 [[package]]
 name = "fmf-core"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "proptest",
 ]
 
 [[package]]
 name = "fmf-ffi"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "fmf-contract",
  "fmf-runtime",
@@ -509,7 +509,7 @@ dependencies = [
 
 [[package]]
 name = "fmf-launcher"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "windows-sys",
  "winresource",
@@ -517,7 +517,7 @@ dependencies = [
 
 [[package]]
 name = "fmf-proto"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "fmf-contract",
  "serde",
@@ -527,7 +527,7 @@ dependencies = [
 
 [[package]]
 name = "fmf-runtime"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "bytemuck",
  "criterion",
@@ -553,7 +553,7 @@ dependencies = [
 
 [[package]]
 name = "fmf-service"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "clap",
  "crossbeam-channel",
