@@ -25,10 +25,10 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: jdx/mise-action@b44d12e7d0d8ee7461bb893e1b1993500433185b # v5.2.7
+      - uses: jdx/mise-action@924e7c586e33d7d4bae9c14e26c5d22e2beb6e78 # v5.3.0
         with:
-          version: "v2026.11.2"
-          sha256: 490326d33fcde0686f1280f69b9b021e1842ee2bbd71249c1ebadc2a0efad26b
+          version: "v2026.11.14"
+          sha256: d190f5d00fd79d4c7bff1f3f5f4e41aa0b4a2a1a9002e6fca1977367be36413e
           install: false
 
       - name: Check pins against latest (beyond-pin)
